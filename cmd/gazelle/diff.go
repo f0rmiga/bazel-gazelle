@@ -17,10 +17,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/trace"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/rule"
@@ -29,7 +31,9 @@ import (
 
 var exitError = fmt.Errorf("encountered changes while running diff")
 
-func diffFile(c *config.Config, f *rule.File) error {
+func diffFile(ctx context.Context, c *config.Config, f *rule.File) error {
+	defer trace.StartRegion(ctx, "diffFile").End()
+
 	rel, err := filepath.Rel(c.RepoRoot, f.Path)
 	if err != nil {
 		return fmt.Errorf("error getting old path for file %q: %v", f.Path, err)
@@ -60,7 +64,7 @@ func diffFile(c *config.Config, f *rule.File) error {
 	}
 
 	if len(f.Content) != 0 {
-    		diff.A = difflib.SplitLines(string(f.Content))
+		diff.A = difflib.SplitLines(string(f.Content))
 	}
 
 	diff.B = difflib.SplitLines(string(newContent))

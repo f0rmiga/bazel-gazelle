@@ -16,7 +16,9 @@ limitations under the License.
 package merger
 
 import (
+	"context"
 	"fmt"
+	"runtime/trace"
 	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/rule"
@@ -28,7 +30,9 @@ import (
 // may be introduced that aren't loaded.
 //
 // This function calls File.Sync before processing loads.
-func FixLoads(f *rule.File, knownLoads []rule.LoadInfo) {
+func FixLoads(ctx context.Context, f *rule.File, knownLoads []rule.LoadInfo) {
+	defer trace.StartRegion(ctx, "FixLoads").End()
+
 	knownFiles := make(map[string]bool)
 	knownSymbols := make(map[string]string)
 	for _, l := range knownLoads {
@@ -60,26 +64,26 @@ func FixLoads(f *rule.File, knownLoads []rule.LoadInfo) {
 	// Make a map of all the symbols from known files used in this file.
 	usedSymbols := make(map[string]map[string]bool)
 	bzl.Walk(f.File, func(x bzl.Expr, stk []bzl.Expr) {
-        ce, ok := x.(*bzl.CallExpr)
-        if !ok {
-            return
-        }
+		ce, ok := x.(*bzl.CallExpr)
+		if !ok {
+			return
+		}
 
-        id, ok := ce.X.(*bzl.Ident)
-        if !ok {
-            return
-        }
+		id, ok := ce.X.(*bzl.Ident)
+		if !ok {
+			return
+		}
 
-        file, ok := knownSymbols[id.Name]
-        if !ok || otherLoadedKinds[id.Name] {
-            return
-        }
+		file, ok := knownSymbols[id.Name]
+		if !ok || otherLoadedKinds[id.Name] {
+			return
+		}
 
-        if usedSymbols[file] == nil {
-            usedSymbols[file] = make(map[string]bool)
-        }
-        usedSymbols[file][id.Name] = true
-    })
+		if usedSymbols[file] == nil {
+			usedSymbols[file] = make(map[string]bool)
+		}
+		usedSymbols[file][id.Name] = true
+	})
 
 	// Fix the load statements. The order is important, so we iterate over
 	// knownLoads instead of knownFiles.

@@ -25,9 +25,11 @@ limitations under the License.
 package repo
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/trace"
 	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/rule"
@@ -121,7 +123,9 @@ func (l *loader) visit(file, function string) bool {
 
 // ListRepositories extracts metadata about repositories declared in a
 // file.
-func ListRepositories(workspace *rule.File) (repos []*rule.Rule, repoFileMap map[string]*rule.File, err error) {
+func ListRepositories(ctx context.Context, workspace *rule.File) (repos []*rule.Rule, repoFileMap map[string]*rule.File, err error) {
+	defer trace.StartRegion(ctx, "ListRepositories").End()
+
 	l := &loader{
 		repoRoot:     filepath.Dir(workspace.Path),
 		repoIndexMap: make(map[string]int),

@@ -37,7 +37,9 @@ limitations under the License.
 package merger
 
 import (
+	"context"
 	"fmt"
+	"runtime/trace"
 	"sort"
 	"strings"
 
@@ -106,7 +108,9 @@ const UnstableInsertIndexKey = "_gazelle_insert_index"
 // If an attribute is marked with a "# keep" comment, it will not be merged.
 // If a rule is marked with a "# keep" comment, the whole rule will not
 // be modified.
-func MergeFile(oldFile *rule.File, emptyRules, genRules []*rule.Rule, phase Phase, kinds map[string]rule.KindInfo) {
+func MergeFile(ctx context.Context, oldFile *rule.File, emptyRules, genRules []*rule.Rule, phase Phase, kinds map[string]rule.KindInfo) {
+	defer trace.StartRegion(ctx, "MergeFile").End()
+
 	getMergeAttrs := func(r *rule.Rule) map[string]bool {
 		if phase == PreResolve {
 			return kinds[r.Kind()].MergeableAttrs

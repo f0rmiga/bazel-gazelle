@@ -18,10 +18,12 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"runtime/trace"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/language"
@@ -59,6 +61,24 @@ func main() {
 	log.SetPrefix("gazelle: ")
 	log.SetFlags(0) // don't print timestamps
 
+	traceOutput := os.Getenv("GAZELLE_TRACE_OUTPUT")
+	if traceOutput != "" {
+		f, err := os.Create(traceOutput)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Fatal(err)
+			}
+		}()
+
+		if err := trace.Start(f); err != nil {
+			log.Fatal(err)
+		}
+		defer trace.Stop()
+	}
+
 	var wd string
 	if wsDir := os.Getenv("BUILD_WORKSPACE_DIRECTORY"); wsDir != "" {
 		wd = wsDir
@@ -69,7 +89,8 @@ func main() {
 		}
 	}
 
-	if err := run(wd, os.Args[1:]); err != nil && err != flag.ErrHelp {
+	ctx := context.Background()
+	if err := run(ctx, wd, os.Args[1:]); err != nil && err != flag.ErrHelp {
 		if err == exitError {
 			os.Exit(1)
 		} else {
@@ -78,7 +99,7 @@ func main() {
 	}
 }
 
-func run(wd string, args []string) error {
+func run(ctx context.Context, wd string, args []string) error {
 	cmd := updateCmd
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "-help" || args[0] == "--help") {
 		cmd = helpCmd
@@ -92,11 +113,11 @@ func run(wd string, args []string) error {
 
 	switch cmd {
 	case fixCmd, updateCmd:
-		return runFixUpdate(wd, cmd, args)
+		return runFixUpdate(ctx, wd, cmd, args)
 	case helpCmd:
 		return help()
 	case updateReposCmd:
-		return updateRepos(wd, args)
+		return updateRepos(ctx, wd, args)
 	default:
 		log.Panicf("unknown command: %v", cmd)
 	}

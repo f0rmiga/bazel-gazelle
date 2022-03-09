@@ -16,14 +16,17 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"runtime/trace"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
 
-func printFile(c *config.Config, f *rule.File) error {
+func printFile(ctx context.Context, c *config.Config, f *rule.File) error {
+	defer trace.StartRegion(ctx, "printFile").End()
 	fmt.Printf(">>> %s\n", f.Path)
 	content := f.Format()
 	_, err := os.Stdout.Write(content)

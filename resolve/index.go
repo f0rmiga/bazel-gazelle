@@ -16,7 +16,9 @@ limitations under the License.
 package resolve
 
 import (
+	"context"
 	"log"
+	"runtime/trace"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/label"
@@ -132,13 +134,16 @@ func NewRuleIndex(mrslv func(r *rule.Rule, pkgRel string) Resolver, exts ...inte
 // non-nil slice.
 //
 // AddRule may only be called before Finish.
-func (ix *RuleIndex) AddRule(c *config.Config, r *rule.Rule, f *rule.File) {
+func (ix *RuleIndex) AddRule(ctx context.Context, c *config.Config, r *rule.Rule, f *rule.File) {
 	var lang string
 	var imps []ImportSpec
 	if rslv := ix.mrslv(r, f.Pkg); rslv != nil {
 		lang = rslv.Name()
 		if passesLanguageFilter(c.Langs, lang) {
+			traceRegion := trace.StartRegion(ctx, "Imports")
+			trace.Logf(ctx, "Imports", "indexing %q in %q", r.Name(), f.Pkg)
 			imps = rslv.Imports(c, r, f)
+			traceRegion.End()
 		}
 	}
 	// If imps == nil, the rule is not importable. If imps is the empty slice,
@@ -168,9 +173,12 @@ func (ix *RuleIndex) AddRule(c *config.Config, r *rule.Rule, f *rule.File) {
 //
 // Finish must be called after all AddRule calls and before any
 // FindRulesByImport calls.
-func (ix *RuleIndex) Finish() {
+func (ix *RuleIndex) Finish(ctx context.Context) {
 	for _, r := range ix.rules {
+		traceRegion := trace.StartRegion(ctx, "Embeds")
+		trace.Logf(ctx, "Embeds", "embedding %q in %q", r.rule.Name(), r.file.Pkg)
 		ix.collectEmbeds(r)
+		traceRegion.End()
 	}
 	ix.buildImportIndex()
 }

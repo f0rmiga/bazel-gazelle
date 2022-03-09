@@ -17,15 +17,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime/trace"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
 
-func fixFile(c *config.Config, f *rule.File) error {
+func fixFile(ctx context.Context, c *config.Config, f *rule.File) error {
+	defer trace.StartRegion(ctx, "fixFile").End()
 	newContent := f.Format()
 	if bytes.Equal(f.Content, newContent) {
 		return nil

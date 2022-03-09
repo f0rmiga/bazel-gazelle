@@ -17,11 +17,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/trace"
 	"sort"
 	"strings"
 
@@ -50,7 +52,9 @@ func getUpdateReposConfig(c *config.Config) *updateReposConfig {
 	return c.Exts[updateReposName].(*updateReposConfig)
 }
 
-type updateReposConfigurer struct{}
+type updateReposConfigurer struct {
+	ctx context.Context
+}
 
 type macroFlag struct {
 	macroFileName *string
@@ -82,7 +86,7 @@ func (*updateReposConfigurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *con
 	fs.BoolVar(&uc.pruneRules, "prune", false, "When enabled, Gazelle will remove rules that no longer have equivalent repos in the Gopkg.lock/go.mod file. Can only used with -from_file.")
 }
 
-func (*updateReposConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
+func (urc *updateReposConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	uc := getUpdateReposConfig(c)
 	switch {
 	case uc.repoFilePath != "":
@@ -109,7 +113,7 @@ func (*updateReposConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) err
 	if err != nil {
 		return fmt.Errorf("loading WORKSPACE file: %v", err)
 	}
-	c.Repos, uc.repoFileMap, err = repo.ListRepositories(uc.workspace)
+	c.Repos, uc.repoFileMap, err = repo.ListRepositories(urc.ctx, uc.workspace)
 	if err != nil {
 		return fmt.Errorf("loading WORKSPACE file: %v", err)
 	}
@@ -121,10 +125,13 @@ func (*updateReposConfigurer) KnownDirectives() []string { return nil }
 
 func (*updateReposConfigurer) Configure(c *config.Config, rel string, f *rule.File) {}
 
-func updateRepos(wd string, args []string) (err error) {
+func updateRepos(ctx context.Context, wd string, args []string) (err error) {
+	ctx, task := trace.NewTask(ctx, "updateRepos")
+	defer task.End()
+
 	// Build configuration with all languages.
 	cexts := make([]config.Configurer, 0, len(languages)+2)
-	cexts = append(cexts, &config.CommonConfigurer{}, &updateReposConfigurer{})
+	cexts = append(cexts, &config.CommonConfigurer{}, &updateReposConfigurer{ctx})
 	kinds := make(map[string]rule.KindInfo)
 	loads := []rule.LoadInfo{}
 	for _, lang := range languages {
@@ -134,7 +141,7 @@ func updateRepos(wd string, args []string) (err error) {
 			kinds[kind] = info
 		}
 	}
-	c, err := newUpdateReposConfiguration(wd, args, cexts)
+	c, err := newUpdateReposConfiguration(ctx, wd, args, cexts)
 	if err != nil {
 		return err
 	}
@@ -167,9 +174,9 @@ func updateRepos(wd string, args []string) (err error) {
 	// Generate rules from command language arguments or by importing a file.
 	var gen, empty []*rule.Rule
 	if uc.repoFilePath == "" {
-		gen, err = updateRepoImports(c, rc)
+		gen, err = updateRepoImports(ctx, c, rc)
 	} else {
-		gen, empty, err = importRepos(c, rc)
+		gen, empty, err = importRepos(ctx, c, rc)
 	}
 	if err != nil {
 		return err
@@ -271,8 +278,8 @@ func updateRepos(wd string, args []string) (err error) {
 
 	updatedFiles := make(map[string]*rule.File)
 	for _, f := range sortedFiles {
-		merger.MergeFile(f, emptyForFiles[f], genForFiles[f], merger.PreResolve, kinds)
-		merger.FixLoads(f, loads)
+		merger.MergeFile(ctx, f, emptyForFiles[f], genForFiles[f], merger.PreResolve, kinds)
+		merger.FixLoads(ctx, f, loads)
 		if f == uc.workspace {
 			if err := merger.CheckGazelleLoaded(f); err != nil {
 				return err
@@ -305,7 +312,9 @@ func updateRepos(wd string, args []string) (err error) {
 	return nil
 }
 
-func newUpdateReposConfiguration(wd string, args []string, cexts []config.Configurer) (*config.Config, error) {
+func newUpdateReposConfiguration(ctx context.Context, wd string, args []string, cexts []config.Configurer) (*config.Config, error) {
+	defer trace.StartRegion(ctx, "newUpdateReposConfiguration").End()
+
 	c := config.New()
 	c.WorkDir = wd
 	fs := flag.NewFlagSet("gazelle", flag.ContinueOnError)
@@ -351,7 +360,9 @@ FLAGS:
 	fs.PrintDefaults()
 }
 
-func updateRepoImports(c *config.Config, rc *repo.RemoteCache) (gen []*rule.Rule, err error) {
+func updateRepoImports(ctx context.Context, c *config.Config, rc *repo.RemoteCache) (gen []*rule.Rule, err error) {
+	defer trace.StartRegion(ctx, "updateRepoImports").End()
+
 	// TODO(jayconrod): let the user pick the language with a command line flag.
 	// For now, only use the first language that implements the interface.
 	uc := getUpdateReposConfig(c)
@@ -365,6 +376,7 @@ func updateRepoImports(c *config.Config, rc *repo.RemoteCache) (gen []*rule.Rule
 	if updater == nil {
 		return nil, fmt.Errorf("no languages can update repositories")
 	}
+
 	res := updater.UpdateRepos(language.UpdateReposArgs{
 		Config:  c,
 		Imports: uc.importPaths,
@@ -373,7 +385,9 @@ func updateRepoImports(c *config.Config, rc *repo.RemoteCache) (gen []*rule.Rule
 	return res.Gen, res.Error
 }
 
-func importRepos(c *config.Config, rc *repo.RemoteCache) (gen, empty []*rule.Rule, err error) {
+func importRepos(ctx context.Context, c *config.Config, rc *repo.RemoteCache) (gen, empty []*rule.Rule, err error) {
+	defer trace.StartRegion(ctx, "importRepos").End()
+
 	uc := getUpdateReposConfig(c)
 	importSupported := false
 	var importer language.RepoImporter
@@ -393,6 +407,7 @@ func importRepos(c *config.Config, rc *repo.RemoteCache) (gen, empty []*rule.Rul
 			return nil, nil, fmt.Errorf("no supported languages can import configuration files")
 		}
 	}
+
 	res := importer.ImportRepos(language.ImportReposArgs{
 		Config: c,
 		Path:   uc.repoFilePath,

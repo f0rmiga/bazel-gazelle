@@ -18,11 +18,13 @@ limitations under the License.
 package walk
 
 import (
+	"context"
 	"io/ioutil"
 	"log"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime/trace"
 	"strings"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -108,7 +110,9 @@ type WalkFunc func(dir, rel string, c *config.Config, update bool, f *rule.File,
 // to the wf callback should be set.
 //
 // wf is a function that may be called in each directory.
-func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode, wf WalkFunc) {
+func Walk(ctx context.Context, c *config.Config, cexts []config.Configurer, dirs []string, mode Mode, wf WalkFunc) {
+	defer trace.StartRegion(ctx, "Walk").End()
+
 	knownDirectives := make(map[string]bool)
 	for _, cext := range cexts {
 		for _, d := range cext.KnownDirectives() {
@@ -122,24 +126,29 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
 
 	var visit func(*config.Config, string, string, bool)
 	visit = func(c *config.Config, dir, rel string, updateParent bool) {
+		trace.Logf(ctx, "Walk", "visiting %q", rel)
+
 		haveError := false
 
 		// TODO: OPT: ReadDir stats all the files, which is slow. We just care about
 		// names and modes, so we should use something like
 		// golang.org/x/tools/internal/fastwalk to speed this up.
+		traceRegion := trace.StartRegion(ctx, "Walk.readDir")
+		trace.Logf(ctx, "Walk.readDir", "reading dir %q", rel)
 		files, err := ioutil.ReadDir(dir)
+		traceRegion.End()
 		if err != nil {
 			log.Print(err)
 			return
 		}
 
-		f, err := loadBuildFile(c, rel, dir, files)
+		f, err := loadBuildFile(ctx, c, rel, dir, files)
 		if err != nil {
 			log.Print(err)
 			haveError = true
 		}
 
-		c = configure(cexts, knownDirectives, c, rel, f)
+		c = configure(ctx, cexts, knownDirectives, c, rel, f)
 		wc := getWalkConfig(c)
 
 		if wc.isExcluded(rel, ".") {
@@ -147,8 +156,10 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
 		}
 
 		var subdirs, regularFiles []string
+		traceRegion = trace.StartRegion(ctx, "Walk.processFiles")
 		for _, fi := range files {
 			base := fi.Name()
+			trace.Logf(ctx, "Walk.processFiles", "processing file %q in %q", base, rel)
 			switch {
 			case base == "" || wc.isExcluded(rel, base):
 				continue
@@ -160,6 +171,7 @@ func Walk(c *config.Config, cexts []config.Configurer, dirs []string, mode Mode,
 				regularFiles = append(regularFiles, base)
 			}
 		}
+		traceRegion.End()
 
 		shouldUpdate := shouldUpdate(rel, mode, updateParent, updateRels)
 		for _, sub := range subdirs {
@@ -249,7 +261,9 @@ func shouldVisit(rel string, mode Mode, updateParent bool, updateRels map[string
 	}
 }
 
-func loadBuildFile(c *config.Config, pkg, dir string, files []os.FileInfo) (*rule.File, error) {
+func loadBuildFile(ctx context.Context, c *config.Config, pkg, dir string, files []os.FileInfo) (*rule.File, error) {
+	defer trace.StartRegion(ctx, "loadBuildFile").End()
+	trace.Logf(ctx, "loadBuildFile", "loading build file %q", pkg)
 	var err error
 	readDir := dir
 	readFiles := files
@@ -267,7 +281,7 @@ func loadBuildFile(c *config.Config, pkg, dir string, files []os.FileInfo) (*rul
 	return rule.LoadFile(path, pkg)
 }
 
-func configure(cexts []config.Configurer, knownDirectives map[string]bool, c *config.Config, rel string, f *rule.File) *config.Config {
+func configure(ctx context.Context, cexts []config.Configurer, knownDirectives map[string]bool, c *config.Config, rel string, f *rule.File) *config.Config {
 	if rel != "" {
 		c = c.Clone()
 	}
@@ -279,7 +293,10 @@ func configure(cexts []config.Configurer, knownDirectives map[string]bool, c *co
 		}
 	}
 	for _, cext := range cexts {
+		traceRegion := trace.StartRegion(ctx, "Configure")
+		trace.Logf(ctx, "Configure", "configuring %q", rel)
 		cext.Configure(c, rel, f)
+		traceRegion.End()
 	}
 	return c
 }

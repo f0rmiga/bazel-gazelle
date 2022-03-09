@@ -17,12 +17,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/trace"
 	"sort"
 	"strings"
 
@@ -51,7 +53,7 @@ type updateConfig struct {
 	patchBuffer    bytes.Buffer
 }
 
-type emitFunc func(c *config.Config, f *rule.File) error
+type emitFunc func(ctx context.Context, c *config.Config, f *rule.File) error
 
 var modeFromName = map[string]emitFunc{
 	"print": printFile,
@@ -70,6 +72,7 @@ type updateConfigurer struct {
 	recursive      bool
 	knownImports   []string
 	repoConfigPath string
+	ctx            context.Context
 }
 
 func (ucr *updateConfigurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
@@ -141,7 +144,7 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	} else if err == nil {
-		c.Repos, _, err = repo.ListRepositories(repoConfigFile)
+		c.Repos, _, err = repo.ListRepositories(ucr.ctx, repoConfigFile)
 		if err != nil {
 			return err
 		}
@@ -175,7 +178,7 @@ func (ucr *updateConfigurer) CheckFlags(fs *flag.FlagSet, c *config.Config) erro
 	}
 	if workspace != nil {
 		c.RepoName = findWorkspaceName(workspace)
-		_, repoFileMap, err := repo.ListRepositories(workspace)
+		_, repoFileMap, err := repo.ListRepositories(ucr.ctx, workspace)
 		if err != nil {
 			return err
 		}
@@ -238,11 +241,14 @@ var genericLoads = []rule.LoadInfo{
 	},
 }
 
-func runFixUpdate(wd string, cmd command, args []string) (err error) {
+func runFixUpdate(ctx context.Context, wd string, cmd command, args []string) (err error) {
+	ctx, task := trace.NewTask(ctx, "runFixUpdate")
+	defer task.End()
+
 	cexts := make([]config.Configurer, 0, len(languages)+3)
 	cexts = append(cexts,
 		&config.CommonConfigurer{},
-		&updateConfigurer{},
+		&updateConfigurer{ctx: ctx},
 		&walk.Configurer{},
 		&resolve.Configurer{})
 	mrslv := newMetaResolver()
@@ -260,25 +266,28 @@ func runFixUpdate(wd string, cmd command, args []string) (err error) {
 	}
 	ruleIndex := resolve.NewRuleIndex(mrslv.Resolver, exts...)
 
-	c, err := newFixUpdateConfiguration(wd, cmd, args, cexts)
+	c, err := newFixUpdateConfiguration(ctx, wd, cmd, args, cexts)
 	if err != nil {
 		return err
 	}
 
-	if err := fixRepoFiles(c, loads); err != nil {
+	if err := fixRepoFiles(ctx, c, loads); err != nil {
 		return err
 	}
 
 	// Visit all directories in the repository.
 	var visits []visitRecord
 	uc := getUpdateConfig(c)
-	walk.Walk(c, cexts, uc.dirs, uc.walkMode, func(dir, rel string, c *config.Config, update bool, f *rule.File, subdirs, regularFiles, genFiles []string) {
+	walk.Walk(ctx, c, cexts, uc.dirs, uc.walkMode, func(dir, rel string, c *config.Config, update bool, f *rule.File, subdirs, regularFiles, genFiles []string) {
+		defer trace.StartRegion(ctx, "walkFunc").End()
+		trace.Logf(ctx, "walkFunc", "walking %q", rel)
+
 		// If this file is ignored or if Gazelle was not asked to update this
 		// directory, just index the build file and move on.
 		if !update {
 			if c.IndexLibraries && f != nil {
 				for _, r := range f.Rules {
-					ruleIndex.AddRule(c, r, f)
+					ruleIndex.AddRule(ctx, c, r, f)
 				}
 			}
 			return
@@ -295,6 +304,8 @@ func runFixUpdate(wd string, cmd command, args []string) (err error) {
 		var empty, gen []*rule.Rule
 		var imports []interface{}
 		for _, l := range filterLanguages(c, languages) {
+			traceRegion := trace.StartRegion(ctx, "GenerateRules")
+			trace.Logf(ctx, "GenerateRules", "generating %q", rel)
 			res := l.GenerateRules(language.GenerateArgs{
 				Config:       c,
 				Dir:          dir,
@@ -305,6 +316,7 @@ func runFixUpdate(wd string, cmd command, args []string) (err error) {
 				GenFiles:     genFiles,
 				OtherEmpty:   empty,
 				OtherGen:     gen})
+			traceRegion.End()
 			if len(res.Gen) != len(res.Imports) {
 				log.Panicf("%s: language %s generated %d rules but returned %d imports", rel, l.Name(), len(res.Gen), len(res.Imports))
 			}
@@ -337,7 +349,7 @@ func runFixUpdate(wd string, cmd command, args []string) (err error) {
 				r.Insert(f)
 			}
 		} else {
-			merger.MergeFile(f, empty, gen, merger.PreResolve,
+			merger.MergeFile(ctx, f, empty, gen, merger.PreResolve,
 				unionKindInfoMaps(kinds, mappedKindInfo))
 		}
 		visits = append(visits, visitRecord{
@@ -354,13 +366,13 @@ func runFixUpdate(wd string, cmd command, args []string) (err error) {
 		// Add library rules to the dependency resolution table.
 		if c.IndexLibraries {
 			for _, r := range f.Rules {
-				ruleIndex.AddRule(c, r, f)
+				ruleIndex.AddRule(ctx, c, r, f)
 			}
 		}
 	})
 
 	// Finish building the index for dependency resolution.
-	ruleIndex.Finish()
+	ruleIndex.Finish(ctx)
 
 	// Resolve dependencies.
 	rc, cleanupRc := repo.NewRemoteCache(uc.repos)
@@ -373,18 +385,21 @@ func runFixUpdate(wd string, cmd command, args []string) (err error) {
 		for i, r := range v.rules {
 			from := label.New(c.RepoName, v.pkgRel, r.Name())
 			if rslv := mrslv.Resolver(r, v.pkgRel); rslv != nil {
+				traceRegion := trace.StartRegion(ctx, "Resolve")
+				trace.Logf(ctx, "Resolve", "resolving %q in %q", r.Name(), v.pkgRel)
 				rslv.Resolve(v.c, ruleIndex, rc, r, v.imports[i], from)
+				traceRegion.End()
 			}
 		}
-		merger.MergeFile(v.file, v.empty, v.rules, merger.PostResolve,
+		merger.MergeFile(ctx, v.file, v.empty, v.rules, merger.PostResolve,
 			unionKindInfoMaps(kinds, v.mappedKindInfo))
 	}
 
 	// Emit merged files.
 	var exit error
 	for _, v := range visits {
-		merger.FixLoads(v.file, applyKindMappings(v.mappedKinds, loads))
-		if err := uc.emit(v.c, v.file); err != nil {
+		merger.FixLoads(ctx, v.file, applyKindMappings(v.mappedKinds, loads))
+		if err := uc.emit(ctx, v.c, v.file); err != nil {
 			if err == exitError {
 				exit = err
 			} else {
@@ -401,7 +416,15 @@ func runFixUpdate(wd string, cmd command, args []string) (err error) {
 	return exit
 }
 
-func newFixUpdateConfiguration(wd string, cmd command, args []string, cexts []config.Configurer) (*config.Config, error) {
+func newFixUpdateConfiguration(
+	ctx context.Context,
+	wd string,
+	cmd command,
+	args []string,
+	cexts []config.Configurer,
+) (*config.Config, error) {
+	defer trace.StartRegion(ctx, "newFixUpdateConfiguration").End()
+
 	c := config.New()
 	c.WorkDir = wd
 
@@ -461,7 +484,9 @@ FLAGS:
 	fs.PrintDefaults()
 }
 
-func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
+func fixRepoFiles(ctx context.Context, c *config.Config, loads []rule.LoadInfo) error {
+	defer trace.StartRegion(ctx, "fixRepoFiles").End()
+
 	uc := getUpdateConfig(c)
 	if !c.ShouldFix {
 		return nil
@@ -477,7 +502,7 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 	}
 
 	for _, f := range uc.workspaceFiles {
-		merger.FixLoads(f, loads)
+		merger.FixLoads(ctx, f, loads)
 		workspaceFile := wspace.FindWORKSPACEFile(c.RepoRoot)
 
 		if f.Path == workspaceFile {
@@ -486,7 +511,7 @@ func fixRepoFiles(c *config.Config, loads []rule.LoadInfo) error {
 				return err
 			}
 		}
-		if err := uc.emit(c, f); err != nil {
+		if err := uc.emit(ctx, c, f); err != nil {
 			return err
 		}
 	}
